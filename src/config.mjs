@@ -1,5 +1,5 @@
-// config.mjs — .env 読込・検証・起動時ヘルスチェック（依存ゼロ）。
-// SPEC v2.0 §7.1 / §7.2 準拠。
+// config.mjs — コア設定の読込・検証（チャットアプリ非依存）。
+// アダプタ固有の設定（SIGNAL_* など）は各 adapters/<name>.mjs が process.env から読む。
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, accessSync, constants } from "node:fs";
@@ -27,7 +27,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 loadDotEnv(path.join(ROOT, ".env"));
 
-// --- claude 実行体の解決: RC_CLAUDE_PATH → OS別 native 既定 ---
+// claude 実行体の解決: RC_CLAUDE_PATH → OS別 native 既定
 function resolveClaude() {
   if (process.env.RC_CLAUDE_PATH) return process.env.RC_CLAUDE_PATH;
   const home = os.homedir();
@@ -36,24 +36,27 @@ function resolveClaude() {
     : path.join(home, ".local", "bin", "claude");
 }
 
+const workdir = process.env.RC_WORKDIR || path.join(os.homedir(), "rc-workspace");
+
 export const cfg = {
   root: ROOT,
-  signalNumber: process.env.SIGNAL_NUMBER || "",
-  signalUuid: (process.env.SIGNAL_UUID || "").toLowerCase(),
-  allowedUuids: new Set(
-    (process.env.ALLOWED_UUIDS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
+  // どのチャットアダプタを使うか（adapters/<adapter>.mjs を動的 import）
+  adapter: (process.env.CHAT_ADAPTER || "signal").toLowerCase(),
+  // 操作を許可する送信者ID（チャットアプリ非依存の汎用 allowlist）。
+  // Signal=sourceUuid / Telegram=from.id / Discord=author.id などをそのまま列挙。
+  // 後方互換で ALLOWED_UUIDS も受ける。空なら起動拒否(fail-closed)。
+  allowedSenders: new Set(
+    (process.env.ALLOWED_SENDERS || process.env.ALLOWED_UUIDS || "")
+      .split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
   ),
-  signalApi: (process.env.SIGNAL_API || "http://127.0.0.1:8080").replace(/\/+$/, ""),
-  signalWs: (process.env.SIGNAL_WS || "ws://127.0.0.1:8080").replace(/\/+$/, ""),
-  claudeExe: resolveClaude(),
-  workdir: process.env.RC_WORKDIR || path.join(os.homedir(), "rc-workspace"),
   triggerWords: (process.env.TRIGGER_WORDS || "リモコン,remote,rc")
     .split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
+  claudeExe: resolveClaude(),
+  workdir,
   urlWaitMs: Number(process.env.URL_WAIT_MS || 15000),
   hardIdleTimeoutMs: Number(process.env.HARD_IDLE_TIMEOUT_MS || 1800000),
   maxConcurrent: Number(process.env.MAX_CONCURRENT || 5),
-  sendTimeoutMs: Number(process.env.SEND_TIMEOUT_MS || 10000),
-  tmpDir: path.join(process.env.RC_WORKDIR || path.join(os.homedir(), "rc-workspace"), "tmp"),
+  tmpDir: path.join(workdir, "tmp"),
 };
 
 // WORKDIR を ~/.claude.json の projects キー形式（スラッシュ）に正規化
@@ -67,13 +70,9 @@ export function bridgePointerPath() {
   return path.join(os.homedir(), ".claude", "projects", dirKey, "bridge-pointer.json");
 }
 
-async function httpGet(url, timeoutMs = 4000) {
-  const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-  return r;
-}
-
-// 起動時ヘルスチェック（fail-fast / fail-closed）。問題リストを返す（空なら OK）。
-export async function healthCheck() {
+// コア（チャットアプリ非依存）の起動前ヘルスチェック。問題リストを返す（空なら OK）。
+// アダプタ固有のチェック（API到達など）は adapter.healthCheck() 側で行う。
+export function coreHealthCheck() {
   const problems = [];
 
   // 1. claude 実体
@@ -81,16 +80,14 @@ export async function healthCheck() {
   catch { problems.push(`claude 実行体が見つかりません: ${cfg.claudeExe}（RC_CLAUDE_PATH を確認）`); }
 
   // 2. claude.ai ログイン（firstParty）
-  if (!problems.length) {
+  if (problems.length === 0) {
     try {
       const out = execFileSync(cfg.claudeExe, ["auth", "status", "--json"], { timeout: 15000, encoding: "utf8" });
       const j = JSON.parse(out);
       if (!(j.loggedIn === true && (j.apiProvider === "firstParty" || j.authMethod === "claude.ai"))) {
-        problems.push("claude.ai にログインしていません（API キー不可）。ホストで `claude` → `/login`（claude.ai）。");
+        problems.push("claude.ai にログインしていません（API キー不可）。`claude` → `/login`（claude.ai）。");
       }
-    } catch (e) {
-      problems.push(`claude auth status 失敗: ${e.message}`);
-    }
+    } catch (e) { problems.push(`claude auth status 失敗: ${e.message}`); }
   }
 
   // 3. WORKDIR trust 承認
@@ -101,26 +98,11 @@ export async function healthCheck() {
     if (!(proj && proj.hasTrustDialogAccepted === true)) {
       problems.push(`WORKDIR が未 trust: ${cfg.workdir}（その dir で一度 \`claude\` を起動し承認）`);
     }
-  } catch (e) {
-    problems.push(`~/.claude.json 読込失敗: ${e.message}`);
-  }
+  } catch (e) { problems.push(`~/.claude.json 読込失敗: ${e.message}`); }
 
-  // 4. Signal 到達（最大3回×2秒）
-  let signalOk = false;
-  for (let i = 0; i < 3 && !signalOk; i++) {
-    try {
-      const h = await httpGet(`${cfg.signalApi}/v1/health`, 3000);
-      if (h.status === 204 || h.ok) signalOk = true;
-    } catch { /* retry */ }
-    if (!signalOk && i < 2) await new Promise(r => setTimeout(r, 2000));
+  // 4. 認可（fail-closed）
+  if (cfg.allowedSenders.size === 0) {
+    problems.push("ALLOWED_SENDERS が空です（全送信者許可になり危険なので起動を中止）。");
   }
-  if (!signalOk) problems.push(`signal-cli-rest-api に到達できません: ${cfg.signalApi}（docker compose up を確認）`);
-
-  // 5. 認可（fail-closed）
-  if (cfg.allowedUuids.size === 0) {
-    problems.push("ALLOWED_UUIDS が空です（全送信者許可になり危険なので起動を中止）。");
-  }
-  if (!cfg.signalNumber) problems.push("SIGNAL_NUMBER が未設定です。");
-
   return problems;
 }

@@ -1,76 +1,95 @@
-# signal-rc-bot
+# remote-claude
 
-Signal で「リモコン開いて」と送ると、このPCで `claude remote-control` を起動し、
-セッション URL（`https://claude.ai/code/session_xxx`）を Signal に返すだけの bot。
-依存ゼロ Node.js（Node22+）。仕様の根拠は [SPEC.md](./SPEC.md)、調査記録は `research-*`。
+チャットアプリで「リモコン開いて」と送ると、手元の PC で `claude remote-control` を起動し、
+セッション URL（`https://claude.ai/code/session_...`）を返すだけの bot。依存ゼロ Node.js（Node22+）。
 
-## 構成
-- `src/config.mjs` … .env 読込・5項目ヘルスチェック
-- `src/signal.mjs` … Signal アダプタ（受信WS / 送信HTTP / allowlist）※チャットアプリ依存はここだけ
-- `src/rc.mjs` … RC 起動・URL抽出・kill・後始末（チャットアプリ非依存のコア）
-- `src/bot.mjs` … 統合・寿命管理・多重起動防止・監査
-- `docker-compose.yml` … signal-cli-rest-api（受信/送信基盤）
-- `supervisor.ps1` … 常駐ラッパ（Task Scheduler から起動）
+**コア（RC起動→URL発行）はチャットアプリ非依存**で、Signal / Telegram / Discord などは
+`adapters/<name>.mjs` を差し替えるだけで対応できます。
+
+## 何ができる？
+- スマホ等のチャットから一言送る → PC で Remote Control セッションが起動 → 返ってきた URL を開けば、
+  どこからでもその PC の Claude Code を操作できる。
+- リンク発行の中核は claude CLI の実機挙動に基づく実装（詳細は [SPEC.md](./SPEC.md)）。
+
+## アーキテクチャ
+```
+チャットアプリ ──(adapter)──▶ コア ──▶ claude remote-control ──▶ session URL ──(adapter)──▶ 返信
+  src/adapters/<name>.mjs       src/core/ (チャットアプリ非依存)
+```
+- `src/core/rc.mjs` … RC 起動・URL 抽出・kill・後始末（**転用の核**）
+- `src/core/rc-link-bot.mjs` … 受信→allowlist→トリガ→RC起動→返信、寿命管理・監査
+- `src/adapters/<name>.mjs` … チャットアプリ固有（受信・送信・送信者ID）
+- `src/index.mjs` … `CHAT_ADAPTER` でアダプタを動的選択して起動
+
+## 対応アダプタ
+| adapter | 用途 | ポート開放 |
+|---|---|---|
+| `signal` | 実運用（signal-cli-rest-api 経由） | 不要 |
+| `fake` | テスト/デモ（stdin 入力） | - |
+| （自作） | [docs/ADAPTERS.md](./docs/ADAPTERS.md) 参照 | SNS次第 |
 
 ## 前提
 - claude（native install）導入済み・**claude.ai でログイン済み**・`RC_WORKDIR` を **trust 承認済み**。
-- Signal アカウントを signal-cli に **linked device** 登録済み（既存 `signal-cli-test` の `signal-cli-config` を流用可）。
-- Node.js 22+ / Docker。
+- Node.js 22+。
 
-## セットアップ
-1. 設定:
-   ```
-   cp .env.example .env
-   ```
-   `.env` の `SIGNAL_NUMBER`（自分の番号）, `ALLOWED_UUIDS`（自分のUUID）, `RC_CLAUDE_PATH`, `RC_WORKDIR` を確認。
-   （番号・UUID はあなたがリンクした Signal アカウントの値）
+## クイックスタート（fake アダプタ・SNS不要で30秒動作確認）
+```bash
+cp .env.example .env
+# .env を編集: CHAT_ADAPTER=fake / ALLOWED_SENDERS=fake-user / RC_CLAUDE_PATH / RC_WORKDIR
+npm run check                 # 構文チェック
+npm run rc-once               # コア単体: RCを1回起動→URL表示→自動kill
+echo リモコン | node src/index.mjs   # 受信→RC起動→URLが標準出力に返る
+```
 
-2. bot専用アカウント作成（案A・別番号で完全分離。port 8081 / 既存8080とは別コンテナ）:
-   - `docker compose up -d`（signal-rc-api を 127.0.0.1:8081 で起動。volume=./signal-cli-config は空のbot専用）。
-   - captcha 取得: ブラウザで https://signalcaptchas.org/registration/generate.html を開き、完了後の `signalcaptcha://...` トークンをコピー。
-   - 登録: `curl -X POST http://127.0.0.1:8081/v1/register/<BOT番号> -H "Content-Type: application/json" -d '{"captcha":"<token>"}'`
-   - SMSの6桁で verify: `curl -X POST http://127.0.0.1:8081/v1/register/<BOT番号>/verify/<コード>`
-   - `.env` に `SIGNAL_NUMBER=<BOT番号>` を設定（SIGNAL_API/WS は既に :8081）。
+## Signal で使う
+1. 設定: `.env` で `CHAT_ADAPTER=signal`、`SIGNAL_NUMBER`、`ALLOWED_SENDERS`（操作する側のUUID）。
+2. bot 専用アカウント（推奨）: 個人利用と分けるため、bot 専用の電話番号で Signal を用意。
+   - 公式 Signal アプリでその番号を登録 → signal-cli を **linked device** としてリンクするのが確実
+     （captcha 直接 register は signal 側の都合で失敗することがある）。
+3. 受信基盤: `docker compose up -d`（`signal-cli-rest-api` を 127.0.0.1:8081 で起動）。
+   - リンク: `GET http://127.0.0.1:8081/v1/qrcodelink?device_name=remote-claude` のQRを bot 端末の Signal でスキャン。
+4. 送信者UUID確認: bot 起動後に bot へ1通送ると受信ログに `sourceUuid` が出る → `ALLOWED_SENDERS` へ。
+5. 起動: `npm start` → チャットから「リモコン開いて」→ URL が返れば成功。
 
-3. allowlist（=操作者＝あなたの個人アカウント）:
-   - `.env` の `ALLOWED_UUIDS` にあなたの個人UUID（操作する側のアカウント）。
-   - bot自身の `SIGNAL_UUID` は登録後 `GET http://127.0.0.1:8081/v1/identities/<BOT番号>` 等で確認し設定（エコー無視用・任意）。
-   - 運用: あなたの個人Signalから **bot番号宛** に「リモコン開いて」を送る → bot が URL を返信。
-
-4. trust 承認（未済なら）:
-   ```
-   ! claude   （RC_WORKDIR で一度起動して trust を承認）
-   ```
-
-5. 動作確認:
-   ```
-   node --check src/config.mjs   # 構文
-   npm run rc-once               # RC を1回起動→URL表示→5秒後kill（Signal不要のコア確認）
-   npm run health                # ヘルスチェックのみ（signal-cli-rest-api 到達確認込み）
-   npm start                     # 本起動
-   ```
-
-6. スマホから「リモコン開いて」→ URL が返れば成功。
+詳細・既知の注意は [SPEC.md](./SPEC.md)。
 
 ## 常駐（Windows）
-1. 電源（管理者）:
-   ```
-   powercfg /change standby-timeout-ac 0
-   powercfg /change hibernate-timeout-ac 0
-   powercfg /hibernate off
-   ```
-2. Task Scheduler に `supervisor.ps1` を登録:
-   - トリガ: ログオン時（**30〜60秒遅延**）
-   - 操作: `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File <絶対パス>\supervisor.ps1`
-   - 設定: 「ユーザーがログオンしているときのみ実行」/ `InteractiveToken` / `ExecutionTimeLimit=PT0S`(無期限) / 多重起動=新しいインスタンスを開始しない / バッテリ条件オフ
-   - ※サービス化(NSSM 等)は不可（Session 0 では claude.ai ログイン・trust に到達できない）。
+```powershell
+# 電源（管理者）
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
+powercfg /hibernate off
+```
+- `supervisor.ps1`（`node src/index.mjs` を while 監視で再起動）を Task Scheduler の
+  **ログオン時トリガ（30〜60秒遅延・InteractiveToken・ExecutionTimeLimit=PT0S）** で登録。
+- サービス化（NSSM 等）は不可（Session 0 では claude.ai ログイン・trust に到達できない）。
 
-## セキュリティ要点（詳細は SPEC §6）
-- allowlist は `sourceUuid` 完全一致のみ。グループ経由・許可外は無言破棄。
-- 返信先は自分宛(Note to Self)を主防御。RC URL は実質 bearer なので扱い注意。
-- debug-file 等の機微ファイルは URL 抽出直後に 0x00 上書き削除（`rc.mjs`）。
-- `.env` / `signal-cli-config/` は `.gitignore` 済み。ACL を本人のみ読取に。
+## 新しいSNSに対応する
+`adapters/<name>.mjs` を1つ追加して `createAdapter(cfg)` を実装し、`.env` の `CHAT_ADAPTER=<name>` にするだけ。
+コアは変更不要。規約・最小実装例は [docs/ADAPTERS.md](./docs/ADAPTERS.md)。
+- 受信が outbound のSNS（Telegram/Discord/Slack/Signal）はローカルで完結・ポート開放不要。
+- webhook 必須のSNS（LINE/WhatsApp）はトンネル（cloudflared/ngrok）が要る。
 
-## 既知の未確定点
-`SPEC.md §12` を参照（no-console 起動、linked device 実機確認、`JSON_RPC_RECEIVE_MODE=manual` 等）。
-本実装は既存 signal-cli-test と同じ「WS接続=受信」方式（on-start 相当）を踏襲している。
+## セキュリティ
+- **allowlist**: `ALLOWED_SENDERS` の完全一致のみ許可。不一致は無言破棄（fail-closed）。
+- RC の session URL は実質 bearer（URLを持つ相手はマシンを操作可能）。返信先・取り扱いに注意。
+- debug ファイル等の機微は URL 抽出直後に 0x00 上書き削除（`core/rc.mjs`）。
+- `.env`・`signal-cli-config/`（認証）はコミットしない（`.gitignore` 済み）。ACL を本人のみ読取に。
+
+## 構成
+```
+src/
+  index.mjs              エントリ（アダプタ動的選択）
+  config.mjs             コア設定 + 汎用allowlist + コアhealthCheck
+  core/rc.mjs            RC起動・URL発行（非依存・転用の核）
+  core/rc-link-bot.mjs   汎用オーケストレータ
+  adapters/signal.mjs    Signalアダプタ
+  adapters/fake.mjs      テスト用アダプタ
+docs/ADAPTERS.md         アダプタの作り方
+SPEC.md                  設計・実機検証の根拠
+supervisor.ps1           常駐ラッパ
+docker-compose.yml       signal-cli-rest-api
+```
+
+## ライセンス
+MIT

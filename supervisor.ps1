@@ -11,7 +11,7 @@ Set-Location -Path $PSScriptRoot
 
 while ($true) {
   try {
-    $p = Start-Process -FilePath "node.exe" -ArgumentList "src\bot.mjs" `
+    $p = Start-Process -FilePath "node.exe" -ArgumentList "src\index.mjs" `
          -WorkingDirectory $PSScriptRoot -PassThru -WindowStyle Hidden
     $p.WaitForExit()
   } catch {

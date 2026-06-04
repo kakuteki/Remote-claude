@@ -1,14 +1,14 @@
 {
-  "name": "signal-rc-bot",
+  "name": "remote-claude",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Signalで『リモコン開いて』と送ると claude remote-control のセッションURLを返すだけのbot（依存ゼロ / Node22+）",
+  "description": "チャットで頼むと claude remote-control のセッションURLを返す、依存ゼロ・アダプタ式の bot（Signal/任意SNS対応）",
   "engines": { "node": ">=22" },
   "scripts": {
-    "start": "node src/bot.mjs",
-    "health": "node src/bot.mjs --health-only",
-    "rc-once": "node src/rc.mjs",
-    "check": "node --check src/config.mjs && node --check src/signal.mjs && node --check src/rc.mjs && node --check src/bot.mjs"
+    "start": "node src/index.mjs",
+    "health": "node src/index.mjs --health-only",
+    "rc-once": "node src/core/rc.mjs",
+    "check": "node --check src/config.mjs && node --check src/index.mjs && node --check src/core/rc.mjs && node --check src/core/rc-link-bot.mjs && node --check src/adapters/signal.mjs && node --check src/adapters/fake.mjs"
   }
 }
