@@ -1,0 +1,14 @@
+{
+  "name": "signal-rc-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Signalで『リモコン開いて』と送ると claude remote-control のセッションURLを返すだけのbot（依存ゼロ / Node22+）",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/bot.mjs",
+    "health": "node src/bot.mjs --health-only",
+    "rc-once": "node src/rc.mjs",
+    "check": "node --check src/config.mjs && node --check src/signal.mjs && node --check src/rc.mjs && node --check src/bot.mjs"
+  }
+}

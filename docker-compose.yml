@@ -1,0 +1,17 @@
+# signal-rc-bot 専用アカウント用 signal-cli-rest-api（案A・完全分離）。
+# 既存 signal-cli-test の個人アカウント用コンテナ(8080)とは別に、bot専用を 8081 で動かす。
+# volume ./signal-cli-config は空から register で bot 専用アカウントを作成する。
+#
+# 同一 Signal アカウントの signal-cli 二重起動は不可だが、本構成は「別アカウント」なので
+# 既存(8080)と本コンテナ(8081)は併存できる。
+services:
+  signal-rc-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-rc-api
+    environment:
+      - MODE=json-rpc
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ./signal-cli-config:/home/.local/share/signal-cli
+    restart: unless-stopped

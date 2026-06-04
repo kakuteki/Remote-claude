@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+signal-cli-config/
+tmp/
+*.log
+bridge-transcript-*.jsonl
+node_modules/
+
+# 内部資料（機微情報: 番号/UUID/session_id/パス等を含むため公開しない）
+research-*.json
+research-*.md
+PLAN.md
+
